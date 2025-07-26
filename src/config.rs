@@ -49,7 +49,7 @@ impl Config {
 
                 // ⚠️ ПОМЕНЯЙ НА СВОЙ КОШЕЛЕК ДЛЯ КОМИССИЙ!
                 fee_wallet: env::var("FEE_WALLET")
-                    .unwrap_or_else(|_| "YOUR_SOLANA_WALLET_HERE".to_string()),
+                    .unwrap_or_else(|_| "9E9ME8Xjrnnz5tyLqPWUbXVbPjXusEp9NdjKeugDjW5t".to_string()),
 
                 fee_amount: env::var("FEE_AMOUNT")
                     .unwrap_or_else(|_| "1.0".to_string())

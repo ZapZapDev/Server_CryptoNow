@@ -11,16 +11,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 
-# Solana
-solana-client = "1.17"
-solana-sdk = "1.17"
-solana-program = "1.17"
+# Solana - совместимые версии
+solana-client = "1.18"
+solana-sdk = "1.18"
+solana-program = "1.18"
 spl-token = "4.0"
-anchor-client = "0.29"
+spl-associated-token-account = "2.3"
 
-# Криптография
+# Криптография - совместимая версия
 bs58 = "0.5"
-ed25519-dalek = "2.0"
+ed25519-dalek = "1.0"
 sha2 = "0.10"
 
 # QR коды
@@ -35,6 +35,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 log = "0.4"
 env_logger = "0.10"
+urlencoding = "2.1"
 
 # Async
 futures = "0.3"

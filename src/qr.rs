@@ -70,4 +70,4 @@ impl QrService {
 
         Ok(format!("data:image/png;base64,{}", base64_string))
     }
-
+}

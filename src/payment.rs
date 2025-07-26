@@ -5,11 +5,11 @@ use uuid::Uuid;
 use chrono::{DateTime, Utc, Duration};
 
 use crate::config::Config;
-use crate::multichain::{MultichainService, TransactionVerification};
+use crate::multichain::MultichainService;
 use crate::qr::QrService;
 use crate::storage::StorageService;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PaymentService {
     multichain: MultichainService,
     qr_service: QrService,
@@ -112,14 +112,14 @@ impl PaymentService {
             label: request.label.unwrap_or_else(|| format!("Payment {}", request.token)),
             message: request.message.unwrap_or_else(|| {
                 format!("{} {} + {} {} fee",
-                    request.amount, request.token,
-                    self.config.solana.fee_amount, self.config.solana.fee_token)
+                        request.amount, request.token,
+                        self.config.solana.fee_amount, self.config.solana.fee_token)
             }),
             url,
             qr_code,
             status: PaymentStatus::Pending,
             created_at: now,
-            expires_at: now + Duration::minutes(30), // 30 минут на оплату
+            expires_at: now + Duration::minutes(30),
             signature: None,
             verified_at: None,
         };
@@ -160,10 +160,9 @@ impl PaymentService {
 
         // Добавляем сообщение с информацией о комиссии
         let message = format!(
-            "Payment of {} {} (includes {} {} fee to {})",
+            "Payment of {} {} (includes {} {} fee)",
             request.amount, request.token,
-            self.config.solana.fee_amount, self.config.solana.fee_token,
-            &self.config.solana.fee_wallet[..8]
+            self.config.solana.fee_amount, self.config.solana.fee_token
         );
         url.push_str(&format!("&message={}", urlencoding::encode(&message)));
 
