@@ -11,17 +11,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full", "time"] }
 
-# Solana - совместимые версии
-solana-client = "1.18"
-solana-sdk = "1.18"
-solana-program = "1.18"
-spl-token = "4.0"
-spl-associated-token-account = "2.3"
+# Solana - точные совместимые версии (КРИТИЧНО!)
+solana-client = "=1.18.26"
+solana-sdk = "=1.18.26"
+solana-program = "=1.18.26"
+# Используем ту же версию что требует solana
+spl-token = "=4.0.0"
+spl-associated-token-account = "=2.3.0"
 
-# Криптография - совместимая версия
+# Криптография
 bs58 = "0.5"
-ed25519-dalek = "1.0"
-sha2 = "0.10"
 
 # QR коды
 qrcode = "0.14"
@@ -35,7 +34,6 @@ anyhow = "1.0"
 thiserror = "1.0"
 log = "0.4"
 env_logger = "0.10"
-urlencoding = "2.1"
 
 # Async
 futures = "0.3"

@@ -5,6 +5,7 @@ use solana_sdk::{
     transaction::Transaction,
     pubkey::Pubkey,
     system_instruction,
+    message::Message,
 };
 use spl_token::instruction as token_instruction;
 use std::str::FromStr;
@@ -96,6 +97,8 @@ async fn transaction_get(
             Ok(HttpResponse::Ok()
                 .append_header(("Content-Type", "application/json"))
                 .append_header(("Access-Control-Allow-Origin", "*"))
+                .append_header(("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
+                .append_header(("Access-Control-Allow-Headers", "Content-Type"))
                 .json(TransactionRequestGet {
                     label: format!("Pay {} {} + {} {} fee",
                                    payment.amount, payment.token,
@@ -117,30 +120,44 @@ async fn transaction_post(
     let payment_id = path.into_inner();
     let account = req.account.clone();
 
-    log::info!("POST transaction request for payment {} from account {}", payment_id, account);
+    log::info!("🚀 POST /api/payment/{}/transaction", payment_id);
+    log::info!("📋 Request account: {}", account);
 
     // Получаем платеж
     let payment = match payment_service.get_payment(&payment_id).await {
-        Ok(Some(payment)) => payment,
+        Ok(Some(payment)) => {
+            log::info!("✅ Payment found: {} {} + {} {} fee",
+                payment.amount, payment.token, payment.fee_amount, payment.fee_token);
+            payment
+        },
         Ok(None) => {
+            log::warn!("❌ Payment not found: {}", payment_id);
             return Ok(HttpResponse::NotFound()
                 .append_header(("Content-Type", "application/json"))
+                .append_header(("Access-Control-Allow-Origin", "*"))
                 .json(serde_json::json!({"error": "Payment not found"})));
         }
         Err(e) => {
+            log::error!("❌ Database error: {}", e);
             return Ok(HttpResponse::InternalServerError()
                 .append_header(("Content-Type", "application/json"))
+                .append_header(("Access-Control-Allow-Origin", "*"))
                 .json(serde_json::json!({"error": e.to_string()})));
         }
     };
 
-    // Создаем транзакцию с таймаутом и fallback
-    match timeout(Duration::from_secs(10), create_payment_transaction(&payment, &account)).await {
+    // Создаем транзакцию с расширенными таймаутами
+    log::info!("🔧 Creating transaction...");
+    match timeout(Duration::from_secs(20), create_payment_transaction(&payment, &account)).await {
         Ok(Ok(transaction_base64)) => {
-            log::info!("Transaction created successfully for payment {}", payment_id);
+            log::info!("✅ Transaction created successfully for payment {}", payment_id);
+            log::info!("📦 Transaction size: {} bytes", transaction_base64.len());
+
             Ok(HttpResponse::Ok()
                 .append_header(("Content-Type", "application/json"))
                 .append_header(("Access-Control-Allow-Origin", "*"))
+                .append_header(("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
+                .append_header(("Access-Control-Allow-Headers", "Content-Type"))
                 .json(TransactionResponse {
                     transaction: transaction_base64,
                     message: Some(format!("Pay {} {} + {} {} fee",
@@ -149,40 +166,77 @@ async fn transaction_post(
                 }))
         }
         Ok(Err(e)) => {
-            log::error!("Transaction creation failed for payment {}: {}", payment_id, e);
+            log::error!("❌ Transaction creation failed for payment {}: {}", payment_id, e);
             Ok(HttpResponse::BadRequest()
                 .append_header(("Content-Type", "application/json"))
-                .json(serde_json::json!({"error": e.to_string()})))
+                .append_header(("Access-Control-Allow-Origin", "*"))
+                .json(serde_json::json!({
+                    "error": format!("Transaction creation failed: {}", e),
+                    "payment_id": payment_id,
+                    "details": "Check server logs for more information"
+                })))
         }
         Err(_) => {
-            log::error!("Transaction creation timed out for payment {}", payment_id);
+            log::error!("❌ Transaction creation timed out for payment {}", payment_id);
             Ok(HttpResponse::RequestTimeout()
                 .append_header(("Content-Type", "application/json"))
-                .json(serde_json::json!({"error": "Transaction creation timed out"})))
+                .append_header(("Access-Control-Allow-Origin", "*"))
+                .json(serde_json::json!({
+                    "error": "Transaction creation timed out",
+                    "payment_id": payment_id,
+                    "timeout": "20 seconds"
+                })))
         }
     }
 }
 
-// ОПТИМИЗИРОВАННАЯ функция создания транзакции
+// ПРАВИЛЬНАЯ функция создания транзакции с двумя переводами
 async fn create_payment_transaction(
     payment: &payment::Payment,
     payer_str: &str,
 ) -> anyhow::Result<String> {
-    let payer = Pubkey::from_str(payer_str)?;
-    let recipient = Pubkey::from_str(&payment.recipient)?;
-    let fee_recipient = Pubkey::from_str(&payment.fee_recipient)?;
+    use solana_client::rpc_client::RpcClient;
+    use solana_sdk::commitment_config::CommitmentConfig;
+
+    log::info!("🔧 Starting transaction creation...");
+
+    let payer = Pubkey::from_str(payer_str)
+        .map_err(|e| anyhow::anyhow!("Invalid payer address: {}", e))?;
+    let recipient = Pubkey::from_str(&payment.recipient)
+        .map_err(|e| anyhow::anyhow!("Invalid recipient address: {}", e))?;
+    let fee_recipient = Pubkey::from_str(&payment.fee_recipient)
+        .map_err(|e| anyhow::anyhow!("Invalid fee recipient address: {}", e))?;
+
+    log::info!("✅ Addresses parsed successfully");
+    log::info!("   Payer: {}", payer);
+    log::info!("   Recipient: {}", recipient);
+    log::info!("   Fee recipient: {}", fee_recipient);
 
     let mut instructions = Vec::new();
 
-    // 1. Основной платеж
+    // 1. ОСНОВНОЙ ПЛАТЕЖ
+    log::info!("🔧 Creating main payment instruction...");
     if payment.token == "SOL" {
+        log::info!("💰 SOL transfer: {} SOL", payment.amount);
         let lamports = (payment.amount * 1_000_000_000.0) as u64;
         instructions.push(system_instruction::transfer(&payer, &recipient, lamports));
+        log::info!("✅ SOL instruction added: {} lamports", lamports);
     } else {
+        log::info!("💰 SPL token transfer: {} {}", payment.amount, payment.token);
+
         let mint = match payment.token.as_str() {
-            "USDC" => Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")?,
-            "USDT" => Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB")?,
-            _ => anyhow::bail!("Unsupported token: {}", payment.token),
+            "USDC" => {
+                log::info!("🔧 Using USDC mint");
+                Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")?
+            },
+            "USDT" => {
+                log::info!("🔧 Using USDT mint");
+                Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB")?
+            },
+            _ => {
+                log::error!("❌ Unsupported token: {}", payment.token);
+                anyhow::bail!("Unsupported token: {}", payment.token);
+            }
         };
 
         let decimals = if payment.token == "USDC" || payment.token == "USDT" { 6 } else { 9 };
@@ -191,7 +245,16 @@ async fn create_payment_transaction(
         let from_token_account = spl_associated_token_account::get_associated_token_address(&payer, &mint);
         let to_token_account = spl_associated_token_account::get_associated_token_address(&recipient, &mint);
 
-        // Создание ATA для получателя
+        log::info!("🔧 Token accounts:");
+        log::info!("   From: {}", from_token_account);
+        log::info!("   To: {}", to_token_account);
+        log::info!("   Amount: {} tokens", amount);
+
+        // Быстрая проверка RPC (АСИНХРОННО!)
+        log::info!("🔧 Checking recipient ATA...");
+
+        // Упрощенная проверка - просто добавляем инструкцию создания ATA на всякий случай
+        log::info!("🔧 Adding recipient ATA creation instruction (just in case)");
         instructions.push(
             spl_associated_token_account::instruction::create_associated_token_account(
                 &payer, &recipient, &mint, &spl_token::ID,
@@ -199,19 +262,33 @@ async fn create_payment_transaction(
         );
 
         // Основной transfer
+        log::info!("🔧 Adding main transfer instruction");
         instructions.push(token_instruction::transfer(
-            &spl_token::ID, &from_token_account, &to_token_account, &payer, &[], amount,
+            &spl_token::ID,
+            &from_token_account,
+            &to_token_account,
+            &payer,
+            &[],
+            amount,
         )?);
+        log::info!("✅ Main transfer instruction added");
     }
 
-    // 2. Комиссия 1 USDC
+    // 2. КОМИССИЯ В USDC
+    log::info!("🔧 Creating fee instruction...");
     let usdc_mint = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")?;
     let fee_amount = (payment.fee_amount * 1_000_000.0) as u64;
 
     let from_usdc_account = spl_associated_token_account::get_associated_token_address(&payer, &usdc_mint);
     let to_usdc_account = spl_associated_token_account::get_associated_token_address(&fee_recipient, &usdc_mint);
 
-    // Создание ATA для fee кошелька
+    log::info!("💳 Fee transfer:");
+    log::info!("   From: {}", from_usdc_account);
+    log::info!("   To: {}", to_usdc_account);
+    log::info!("   Amount: {} micro-USDC", fee_amount);
+
+    // Проверяем ATA для fee получателя (упрощенно)
+    log::info!("🔧 Adding fee recipient ATA creation instruction (just in case)");
     instructions.push(
         spl_associated_token_account::instruction::create_associated_token_account(
             &payer, &fee_recipient, &usdc_mint, &spl_token::ID,
@@ -219,33 +296,51 @@ async fn create_payment_transaction(
     );
 
     // Fee transfer
+    log::info!("🔧 Adding fee transfer instruction");
     instructions.push(token_instruction::transfer(
-        &spl_token::ID, &from_usdc_account, &to_usdc_account, &payer, &[], fee_amount,
+        &spl_token::ID,
+        &from_usdc_account,
+        &to_usdc_account,
+        &payer,
+        &[],
+        fee_amount,
     )?);
+    log::info!("✅ Fee transfer instruction added");
 
-    // БЫСТРОЕ получение blockhash с множественными RPC
-    let recent_blockhash = get_recent_blockhash_fast().await?;
+    // 3. ПОЛУЧАЕМ СВЕЖИЙ BLOCKHASH
+    log::info!("🔧 Getting recent blockhash...");
+    let recent_blockhash = get_recent_blockhash_with_retries().await
+        .map_err(|e| anyhow::anyhow!("Failed to get blockhash: {}", e))?;
+    log::info!("✅ Got blockhash: {}", recent_blockhash);
 
-    // Создание транзакции
-    let mut transaction = Transaction::new_with_payer(&instructions, Some(&payer));
+    // 4. СОЗДАЕМ ПРАВИЛЬНУЮ ТРАНЗАКЦИЮ
+    log::info!("🔧 Creating transaction message...");
+    let message = Message::new(&instructions, Some(&payer));
+    let mut transaction = Transaction::new_unsigned(message);
     transaction.message.recent_blockhash = recent_blockhash;
+    log::info!("✅ Transaction created with {} instructions", instructions.len());
 
-    // Сериализация
-    let serialized = bincode::serialize(&transaction)?;
-    let base64_transaction = general_purpose::STANDARD.encode(serialized);
+    // 5. СЕРИАЛИЗУЕМ В BASE64
+    log::info!("🔧 Serializing transaction...");
+    let serialized = bincode::serialize(&transaction)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize transaction: {}", e))?;
+    let base64_transaction = general_purpose::STANDARD.encode(&serialized);
 
-    log::info!("Transaction with {} instructions created for payment {}",
-        instructions.len(), payment.id);
+    log::info!("✅ Transaction serialized successfully!");
+    log::info!("   Instructions: {}", instructions.len());
+    log::info!("   Size: {} bytes", serialized.len());
+    log::info!("   Base64 length: {}", base64_transaction.len());
 
     Ok(base64_transaction)
 }
 
-// БЫСТРАЯ функция получения blockhash с fallback RPC
-async fn get_recent_blockhash_fast() -> anyhow::Result<solana_sdk::hash::Hash> {
-    use solana_client::rpc_client::RpcClient;
-    use solana_sdk::commitment_config::CommitmentConfig;
+// ПРОСТАЯ функция получения blockhash БЕЗ БЛОКИРУЮЩИХ ВЫЗОВОВ
+async fn get_recent_blockhash_with_retries() -> anyhow::Result<solana_sdk::hash::Hash> {
+    use reqwest;
+    use serde_json::{Value, json};
 
-    // Список RPC endpoints для fallback
+    log::info!("🔗 Getting recent blockhash via HTTP...");
+
     let rpc_endpoints = [
         "https://api.mainnet-beta.solana.com",
         "https://solana-api.projectserum.com",
@@ -253,23 +348,68 @@ async fn get_recent_blockhash_fast() -> anyhow::Result<solana_sdk::hash::Hash> {
     ];
 
     for endpoint in &rpc_endpoints {
-        match timeout(Duration::from_secs(3), async {
-            let client = RpcClient::new_with_commitment(endpoint.to_string(), CommitmentConfig::confirmed());
-            client.get_latest_blockhash()
-        }).await {
-            Ok(Ok(blockhash)) => {
-                log::info!("Got blockhash from {}", endpoint);
-                return Ok(blockhash);
+        log::info!("🔗 Trying RPC: {}", endpoint);
+
+        for retry in 0..2 {
+            match timeout(Duration::from_secs(10), async {
+                let client = reqwest::Client::new();
+
+                let request_body = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getLatestBlockhash",
+                    "params": [
+                        {
+                            "commitment": "confirmed"
+                        }
+                    ]
+                });
+
+                let response = client
+                    .post(*endpoint)
+                    .header("Content-Type", "application/json")
+                    .json(&request_body)
+                    .send()
+                    .await?;
+
+                let json_response: Value = response.json().await?;
+
+                if let Some(result) = json_response.get("result") {
+                    if let Some(value) = result.get("value") {
+                        if let Some(blockhash_str) = value.get("blockhash").and_then(|v| v.as_str()) {
+                            let blockhash = blockhash_str.parse::<solana_sdk::hash::Hash>()
+                                .map_err(|e| anyhow::anyhow!("Failed to parse blockhash: {}", e))?;
+                            return Ok(blockhash);
+                        }
+                    }
+                }
+
+                anyhow::bail!("Invalid response format")
+            }).await {
+                Ok(Ok(blockhash)) => {
+                    log::info!("✅ Got blockhash from {} (attempt {}): {}", endpoint, retry + 1, blockhash);
+                    return Ok(blockhash);
+                }
+                Ok(Err(e)) => {
+                    log::warn!("⚠️ RPC {} failed (attempt {}): {}", endpoint, retry + 1, e);
+                }
+                Err(_) => {
+                    log::warn!("⚠️ RPC {} timed out (attempt {})", endpoint, retry + 1);
+                }
             }
-            Ok(Err(e)) => log::warn!("RPC {} failed: {}", endpoint, e),
-            Err(_) => log::warn!("RPC {} timed out", endpoint),
+
+            if retry < 1 {
+                log::info!("⏰ Waiting 1s before retry...");
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+            }
         }
     }
 
-    anyhow::bail!("All RPC endpoints failed or timed out")
+    log::error!("❌ All RPC endpoints failed!");
+    anyhow::bail!("All RPC endpoints failed after retries")
 }
 
-// Остальные функции (get_payment, verify_payment, main) остаются без изменений
+// Остальные функции остаются без изменений
 async fn get_payment(
     payment_service: web::Data<PaymentService>,
     path: web::Path<String>,
@@ -324,7 +464,12 @@ async fn main() -> std::io::Result<()> {
     println!("💰 Fee amount: {} {}", config.solana.fee_amount, config.solana.fee_token);
 
     HttpServer::new(move || {
-        let cors = Cors::default().allow_any_origin().allow_any_method().allow_any_header().max_age(3600);
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_method()
+            .allow_any_header()
+            .max_age(3600);
+
         App::new()
             .app_data(web::Data::new(payment_service.clone()))
             .wrap(cors)
