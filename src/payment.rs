@@ -97,7 +97,7 @@ impl PaymentService {
         let payment_id = format!("pay_{}", Uuid::new_v4().simple());
 
         // Создаем Solana Pay URL с комиссией
-        let (url, qr_code) = self.create_solana_pay_url(&request).await?;
+        let (url, qr_code) = self.create_solana_pay_url(&request, &payment_id).await?;
 
         // Создаем объект платежа
         let now = Utc::now();
@@ -138,38 +138,23 @@ impl PaymentService {
     async fn create_solana_pay_url(
         &self,
         request: &CreatePaymentRequest,
+        payment_id: &str,
     ) -> anyhow::Result<(String, String)> {
-        let recipient = Pubkey::from_str(&request.recipient)?;
+        // Твой ngrok URL
+        let ngrok_url = "https://e266cfdadf7e.ngrok-free.app";
 
-        // Создаем базовый URL для Solana Pay
-        let mut url = format!(
-            "solana:{}?amount={}&label={}",
-            recipient,
-            request.amount,
-            urlencoding::encode(&format!("Payment {}", request.token))
+        // Создаем правильный Solana Pay Transaction Request URL
+        let transaction_request_url = format!(
+            "solana:{}/api/payment/{}/transaction",
+            ngrok_url, payment_id
         );
-
-        // Добавляем SPL токен если не SOL
-        if request.token != "SOL" {
-            if let Some(token_config) = self.config.get_token_config(&request.token) {
-                if let Some(mint) = &token_config.mint {
-                    url.push_str(&format!("&spl-token={}", mint));
-                }
-            }
-        }
-
-        // Добавляем сообщение с информацией о комиссии
-        let message = format!(
-            "Payment of {} {} (includes {} {} fee)",
-            request.amount, request.token,
-            self.config.solana.fee_amount, self.config.solana.fee_token
-        );
-        url.push_str(&format!("&message={}", urlencoding::encode(&message)));
 
         // Генерируем QR код
-        let qr_code = self.qr_service.generate_qr_code(&url)?;
+        let qr_code = self.qr_service.generate_qr_code(&transaction_request_url)?;
 
-        Ok((url, qr_code))
+        log::info!("Generated QR URL: {}", transaction_request_url);
+
+        Ok((transaction_request_url, qr_code))
     }
 
     /// Получить информацию о платеже

@@ -36,7 +36,7 @@ impl Config {
         // Загружаем из переменных окружения или используем дефолты
         let config = Config {
             server: ServerConfig {
-                host: env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
+                host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
                 port: env::var("PORT")
                     .unwrap_or_else(|_| "3001".to_string())
                     .parse()
@@ -90,7 +90,7 @@ impl Config {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         // Проверяем что кошелек для комиссий настроен
-        if self.solana.fee_wallet == "YOUR_SOLANA_WALLET_HERE" {
+        if self.solana.fee_wallet == "YOUR_SOLANA_WALLET_HERE" || self.solana.fee_wallet.is_empty() {
             anyhow::bail!("⚠️  Please set your fee wallet in FEE_WALLET environment variable or config!");
         }
 
