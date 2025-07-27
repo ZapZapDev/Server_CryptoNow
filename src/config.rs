@@ -36,7 +36,7 @@ impl Config {
         // Загружаем из переменных окружения или используем дефолты
         let config = Config {
             server: ServerConfig {
-                host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
+                host: env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
                 port: env::var("PORT")
                     .unwrap_or_else(|_| "3001".to_string())
                     .parse()

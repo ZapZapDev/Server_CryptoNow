@@ -9,6 +9,8 @@ use solana_sdk::{
 use spl_token::instruction as token_instruction;
 use std::str::FromStr;
 use base64::{Engine as _, engine::general_purpose};
+use tokio::time::{timeout, Duration};
+
 mod config;
 mod multichain;
 mod payment;
@@ -26,7 +28,6 @@ struct ServerInfo {
     supported_networks: Vec<String>,
 }
 
-// Solana Pay Transaction Request structures
 #[derive(Deserialize)]
 struct TransactionRequestPost {
     account: String,
@@ -52,7 +53,6 @@ async fn index() -> Result<HttpResponse> {
         version: "1.0.0".to_string(),
         supported_networks: vec!["solana".to_string()],
     };
-
     Ok(HttpResponse::Ok().json(info))
 }
 
@@ -83,48 +83,19 @@ async fn create_payment(
     }
 }
 
-// Получить информацию о платеже
-async fn get_payment(
-    payment_service: web::Data<PaymentService>,
-    path: web::Path<String>,
-) -> Result<HttpResponse> {
-    let payment_id = path.into_inner();
-
-    match payment_service.get_payment(&payment_id).await {
-        Ok(Some(payment)) => Ok(HttpResponse::Ok().json(PaymentResponse {
-            success: true,
-            data: Some(payment),
-            error: None,
-        })),
-        Ok(None) => Ok(HttpResponse::NotFound().json(PaymentResponse {
-            success: false,
-            data: None,
-            error: Some("Payment not found".to_string()),
-        })),
-        Err(e) => Ok(HttpResponse::InternalServerError().json(PaymentResponse {
-            success: false,
-            data: None,
-            error: Some(e.to_string()),
-        })),
-    }
-}
-
-// Solana Pay Transaction Request - GET (metadata)
+// GET: Метаданные для Solana Pay
 async fn transaction_get(
     payment_service: web::Data<PaymentService>,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
     let payment_id = path.into_inner();
+    log::info!("GET transaction metadata for payment: {}", payment_id);
 
-    log::info!("GET transaction request for payment: {}", payment_id);
-
-    // Проверяем что платеж существует
     match payment_service.get_payment(&payment_id).await {
         Ok(Some(payment)) => {
             Ok(HttpResponse::Ok()
                 .append_header(("Content-Type", "application/json"))
                 .append_header(("Access-Control-Allow-Origin", "*"))
-                .append_header(("ngrok-skip-browser-warning", "true"))
                 .json(TransactionRequestGet {
                     label: format!("Pay {} {} + {} {} fee",
                                    payment.amount, payment.token,
@@ -132,24 +103,12 @@ async fn transaction_get(
                     icon: "https://solana.com/src/img/branding/solanaLogoMark.svg".to_string(),
                 }))
         }
-        Ok(None) => {
-            Ok(HttpResponse::NotFound()
-                .append_header(("Content-Type", "application/json"))
-                .json(serde_json::json!({
-                   "error": "Payment not found"
-               })))
-        }
-        Err(e) => {
-            Ok(HttpResponse::InternalServerError()
-                .append_header(("Content-Type", "application/json"))
-                .json(serde_json::json!({
-                   "error": e.to_string()
-               })))
-        }
+        Ok(None) => Ok(HttpResponse::NotFound().json(serde_json::json!({"error": "Payment not found"}))),
+        Err(e) => Ok(HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})))
     }
 }
 
-// Solana Pay Transaction Request - POST (transaction)
+// POST: Создание транзакции для Solana Pay
 async fn transaction_post(
     payment_service: web::Data<PaymentService>,
     path: web::Path<String>,
@@ -166,28 +125,22 @@ async fn transaction_post(
         Ok(None) => {
             return Ok(HttpResponse::NotFound()
                 .append_header(("Content-Type", "application/json"))
-                .json(serde_json::json!({
-                   "error": "Payment not found"
-               })));
+                .json(serde_json::json!({"error": "Payment not found"})));
         }
         Err(e) => {
             return Ok(HttpResponse::InternalServerError()
                 .append_header(("Content-Type", "application/json"))
-                .json(serde_json::json!({
-                   "error": e.to_string()
-               })));
+                .json(serde_json::json!({"error": e.to_string()})));
         }
     };
 
-    // Создаем транзакцию с 2 инструкциями
-    match create_payment_transaction(&payment, &account).await {
-        Ok(transaction_base64) => {
+    // Создаем транзакцию с таймаутом и fallback
+    match timeout(Duration::from_secs(10), create_payment_transaction(&payment, &account)).await {
+        Ok(Ok(transaction_base64)) => {
+            log::info!("Transaction created successfully for payment {}", payment_id);
             Ok(HttpResponse::Ok()
                 .append_header(("Content-Type", "application/json"))
                 .append_header(("Access-Control-Allow-Origin", "*"))
-                .append_header(("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
-                .append_header(("Access-Control-Allow-Headers", "Content-Type"))
-                .append_header(("ngrok-skip-browser-warning", "true"))
                 .json(TransactionResponse {
                     transaction: transaction_base64,
                     message: Some(format!("Pay {} {} + {} {} fee",
@@ -195,18 +148,22 @@ async fn transaction_post(
                                           payment.fee_amount, payment.fee_token)),
                 }))
         }
-        Err(e) => {
-            log::error!("Failed to create transaction: {}", e);
+        Ok(Err(e)) => {
+            log::error!("Transaction creation failed for payment {}: {}", payment_id, e);
             Ok(HttpResponse::BadRequest()
                 .append_header(("Content-Type", "application/json"))
-                .json(serde_json::json!({
-                   "error": e.to_string()
-               })))
+                .json(serde_json::json!({"error": e.to_string()})))
+        }
+        Err(_) => {
+            log::error!("Transaction creation timed out for payment {}", payment_id);
+            Ok(HttpResponse::RequestTimeout()
+                .append_header(("Content-Type", "application/json"))
+                .json(serde_json::json!({"error": "Transaction creation timed out"})))
         }
     }
 }
 
-// Функция создания транзакции с несколькими инструкциями
+// ОПТИМИЗИРОВАННАЯ функция создания транзакции
 async fn create_payment_transaction(
     payment: &payment::Payment,
     payer_str: &str,
@@ -222,7 +179,6 @@ async fn create_payment_transaction(
         let lamports = (payment.amount * 1_000_000_000.0) as u64;
         instructions.push(system_instruction::transfer(&payer, &recipient, lamports));
     } else {
-        // SPL токен трансфер
         let mint = match payment.token.as_str() {
             "USDC" => Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")?,
             "USDT" => Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB")?,
@@ -232,91 +188,106 @@ async fn create_payment_transaction(
         let decimals = if payment.token == "USDC" || payment.token == "USDT" { 6 } else { 9 };
         let amount = (payment.amount * 10_f64.powi(decimals)) as u64;
 
-        // Создаем ATA для получателя если не существует
         let from_token_account = spl_associated_token_account::get_associated_token_address(&payer, &mint);
         let to_token_account = spl_associated_token_account::get_associated_token_address(&recipient, &mint);
 
-        // Добавляем создание ATA для получателя
+        // Создание ATA для получателя
         instructions.push(
             spl_associated_token_account::instruction::create_associated_token_account(
-                &payer,
-                &recipient,
-                &mint,
-                &spl_token::ID,
+                &payer, &recipient, &mint, &spl_token::ID,
             )
         );
 
+        // Основной transfer
         instructions.push(token_instruction::transfer(
-            &spl_token::ID,
-            &from_token_account,
-            &to_token_account,
-            &payer,
-            &[],
-            amount,
+            &spl_token::ID, &from_token_account, &to_token_account, &payer, &[], amount,
         )?);
     }
 
-    // 2. Комиссия в USDC на твой кошелек
+    // 2. Комиссия 1 USDC
     let usdc_mint = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")?;
-    let fee_amount = (payment.fee_amount * 1_000_000.0) as u64; // USDC = 6 decimals
+    let fee_amount = (payment.fee_amount * 1_000_000.0) as u64;
 
     let from_usdc_account = spl_associated_token_account::get_associated_token_address(&payer, &usdc_mint);
     let to_usdc_account = spl_associated_token_account::get_associated_token_address(&fee_recipient, &usdc_mint);
 
-    // Создаем ATA для fee recipient если не существует
+    // Создание ATA для fee кошелька
     instructions.push(
         spl_associated_token_account::instruction::create_associated_token_account(
-            &payer,
-            &fee_recipient,
-            &usdc_mint,
-            &spl_token::ID,
+            &payer, &fee_recipient, &usdc_mint, &spl_token::ID,
         )
     );
 
+    // Fee transfer
     instructions.push(token_instruction::transfer(
-        &spl_token::ID,
-        &from_usdc_account,
-        &to_usdc_account,
-        &payer,
-        &[],
-        fee_amount,
+        &spl_token::ID, &from_usdc_account, &to_usdc_account, &payer, &[], fee_amount,
     )?);
 
-    // ПРАВИЛЬНОЕ создание транзакции с актуальным blockhash
-    use solana_client::rpc_client::RpcClient;
-    use solana_sdk::commitment_config::CommitmentConfig;
+    // БЫСТРОЕ получение blockhash с множественными RPC
+    let recent_blockhash = get_recent_blockhash_fast().await?;
 
-    // Получаем актуальный blockhash
-    let rpc_client = RpcClient::new_with_commitment(
-        "https://api.mainnet-beta.solana.com".to_string(),
-        CommitmentConfig::confirmed(),
-    );
-
-    let recent_blockhash = rpc_client.get_latest_blockhash()?;
-
-    // Создаем транзакцию правильно
-    let mut transaction = Transaction::new_with_payer(
-        &instructions,
-        Some(&payer), // fee_payer
-    );
-
-    // Устанавливаем актуальный blockhash
+    // Создание транзакции
+    let mut transaction = Transaction::new_with_payer(&instructions, Some(&payer));
     transaction.message.recent_blockhash = recent_blockhash;
 
-    // ПРАВИЛЬНАЯ сериализация транзакции
+    // Сериализация
     let serialized = bincode::serialize(&transaction)?;
     let base64_transaction = general_purpose::STANDARD.encode(serialized);
 
-    log::info!("Created transaction with {} instructions and recent blockhash for payment {}",
+    log::info!("Transaction with {} instructions created for payment {}",
         instructions.len(), payment.id);
-    log::info!("Instructions: 1) {} {} to {}, 2) {} USDC fee to {}",
-        payment.amount, payment.token, &payment.recipient[..8],
-        payment.fee_amount, &payment.fee_recipient[..8]);
 
     Ok(base64_transaction)
 }
 
-// Верифицировать платеж
+// БЫСТРАЯ функция получения blockhash с fallback RPC
+async fn get_recent_blockhash_fast() -> anyhow::Result<solana_sdk::hash::Hash> {
+    use solana_client::rpc_client::RpcClient;
+    use solana_sdk::commitment_config::CommitmentConfig;
+
+    // Список RPC endpoints для fallback
+    let rpc_endpoints = [
+        "https://api.mainnet-beta.solana.com",
+        "https://solana-api.projectserum.com",
+        "https://rpc.ankr.com/solana",
+    ];
+
+    for endpoint in &rpc_endpoints {
+        match timeout(Duration::from_secs(3), async {
+            let client = RpcClient::new_with_commitment(endpoint.to_string(), CommitmentConfig::confirmed());
+            client.get_latest_blockhash()
+        }).await {
+            Ok(Ok(blockhash)) => {
+                log::info!("Got blockhash from {}", endpoint);
+                return Ok(blockhash);
+            }
+            Ok(Err(e)) => log::warn!("RPC {} failed: {}", endpoint, e),
+            Err(_) => log::warn!("RPC {} timed out", endpoint),
+        }
+    }
+
+    anyhow::bail!("All RPC endpoints failed or timed out")
+}
+
+// Остальные функции (get_payment, verify_payment, main) остаются без изменений
+async fn get_payment(
+    payment_service: web::Data<PaymentService>,
+    path: web::Path<String>,
+) -> Result<HttpResponse> {
+    let payment_id = path.into_inner();
+    match payment_service.get_payment(&payment_id).await {
+        Ok(Some(payment)) => Ok(HttpResponse::Ok().json(PaymentResponse {
+            success: true, data: Some(payment), error: None,
+        })),
+        Ok(None) => Ok(HttpResponse::NotFound().json(PaymentResponse {
+            success: false, data: None, error: Some("Payment not found".to_string()),
+        })),
+        Err(e) => Ok(HttpResponse::InternalServerError().json(PaymentResponse {
+            success: false, data: None, error: Some(e.to_string()),
+        })),
+    }
+}
+
 #[derive(Deserialize)]
 struct VerifyPaymentRequest {
     signature: String,
@@ -329,31 +300,21 @@ async fn verify_payment(
 ) -> Result<HttpResponse> {
     let payment_id = path.into_inner();
     let signature = req.signature.clone();
-
     match payment_service.verify_payment(&payment_id, &signature).await {
         Ok(verification) => Ok(HttpResponse::Ok().json(verification)),
         Err(e) => Ok(HttpResponse::BadRequest().json(serde_json::json!({
-           "success": false,
-           "error": e.to_string()
+           "success": false, "error": e.to_string()
        }))),
     }
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Инициализация логирования
     env_logger::init();
-
     println!("🦀 Starting CryptoNow Rust Server...");
 
-    // Загрузка конфигурации
     let config = Config::load().expect("Failed to load config");
-    println!("✅ Configuration loaded");
-
-    // Инициализация сервисов
-    let payment_service = PaymentService::new(config.clone()).await
-        .expect("Failed to initialize payment service");
-    println!("✅ Payment service initialized");
+    let payment_service = PaymentService::new(config.clone()).await.expect("Failed to initialize payment service");
 
     let host = config.server.host.clone();
     let port = config.server.port;
@@ -361,16 +322,9 @@ async fn main() -> std::io::Result<()> {
     println!("🚀 Server starting on http://{}:{}", host, port);
     println!("📡 Fee wallet: {}", config.solana.fee_wallet);
     println!("💰 Fee amount: {} {}", config.solana.fee_amount, config.solana.fee_token);
-    println!("🔗 Transaction requests: http://{}:{}/api/payment/{{id}}/transaction", host, port);
 
-    // Запуск HTTP сервера
     HttpServer::new(move || {
-        let cors = Cors::default()
-            .allow_any_origin()
-            .allow_any_method()
-            .allow_any_header()
-            .max_age(3600);
-
+        let cors = Cors::default().allow_any_origin().allow_any_method().allow_any_header().max_age(3600);
         App::new()
             .app_data(web::Data::new(payment_service.clone()))
             .wrap(cors)

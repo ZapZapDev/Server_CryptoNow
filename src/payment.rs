@@ -141,7 +141,7 @@ impl PaymentService {
         payment_id: &str,
     ) -> anyhow::Result<(String, String)> {
         // Твой ngrok URL
-        let ngrok_url = "https://e266cfdadf7e.ngrok-free.app";
+        let ngrok_url = "https://44ed40f8f282.ngrok-free.app";
 
         // Создаем правильный Solana Pay Transaction Request URL
         let transaction_request_url = format!(
