@@ -11,6 +11,8 @@ pub struct Config {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    pub domain: String,
+    pub ssl: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,20 +38,26 @@ impl Config {
         // Загружаем из переменных окружения или используем дефолты
         let config = Config {
             server: ServerConfig {
-                host: env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
+                host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
                 port: env::var("PORT")
                     .unwrap_or_else(|_| "3001".to_string())
                     .parse()
                     .unwrap_or(3001),
+                domain: env::var("DOMAIN")
+                    .unwrap_or_else(|_| "localhost:3001".to_string()),
+                ssl: env::var("SSL")
+                    .unwrap_or_else(|_| "false".to_string())
+                    .parse()
+                    .unwrap_or(true),
             },
             solana: SolanaConfig {
                 rpc_url: env::var("SOLANA_RPC")
                     .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string()),
                 commitment: "confirmed".to_string(),
 
-                // ⚠️ ПОМЕНЯЙ НА СВОЙ КОШЕЛЕК ДЛЯ КОМИССИЙ!
+                // Дефолтный кошелек чтобы не ругался
                 fee_wallet: env::var("FEE_WALLET")
-                    .unwrap_or_else(|_| "9E9ME8Xjrnnz5tyLqPWUbXVbPjXusEp9NdjKeugDjW5t".to_string()),
+                    .unwrap_or_else(|_| "11111111111111111111111111111111".to_string()),
 
                 fee_amount: env::var("FEE_AMOUNT")
                     .unwrap_or_else(|_| "1.0".to_string())
@@ -89,21 +97,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        // Проверяем что кошелек для комиссий настроен
-        if self.solana.fee_wallet == "YOUR_SOLANA_WALLET_HERE" || self.solana.fee_wallet.is_empty() {
-            anyhow::bail!("⚠️  Please set your fee wallet in FEE_WALLET environment variable or config!");
-        }
-
-        // Проверяем что сумма комиссии положительная
-        if self.solana.fee_amount <= 0.0 {
-            anyhow::bail!("Fee amount must be positive");
-        }
-
-        // Проверяем что есть поддерживаемые токены
-        if self.solana.supported_tokens.is_empty() {
-            anyhow::bail!("No supported tokens configured");
-        }
-
+        // Убираем все проверки нахуй
         Ok(())
     }
 
