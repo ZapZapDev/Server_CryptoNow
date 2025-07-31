@@ -140,13 +140,14 @@ impl PaymentService {
         request: &CreatePaymentRequest,
         payment_id: &str,
     ) -> anyhow::Result<(String, String)> {
-        // Твой ngrok URL
-        let ngrok_url = "";
+        // Формируем URL на основе конфигурации
+        let protocol = if self.config.server.ssl { "https" } else { "http" };
+        let base_url = format!("{}://{}", protocol, self.config.server.domain);
 
         // Создаем правильный Solana Pay Transaction Request URL
         let transaction_request_url = format!(
             "solana:{}/api/payment/{}/transaction",
-            ngrok_url, payment_id
+            base_url, payment_id
         );
 
         // Генерируем QR код

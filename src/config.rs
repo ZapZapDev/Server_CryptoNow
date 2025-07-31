@@ -55,9 +55,9 @@ impl Config {
                     .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string()),
                 commitment: "confirmed".to_string(),
 
-                // Дефолтный кошелек чтобы не ругался
+                // Твой кошелек из .env
                 fee_wallet: env::var("FEE_WALLET")
-                    .unwrap_or_else(|_| "11111111111111111111111111111111".to_string()),
+                    .unwrap_or_else(|_| "9E9ME8Xjrnnz5tyLqPWUbXVbPjXusEp9NdjKeugDjW5t".to_string()),
 
                 fee_amount: env::var("FEE_AMOUNT")
                     .unwrap_or_else(|_| "1.0".to_string())
