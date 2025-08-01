@@ -191,14 +191,12 @@ async fn transaction_post(
 }
 
 // ПРАВИЛЬНАЯ функция создания транзакции с двумя переводами
+// ПРАВИЛЬНАЯ функция создания ОДНОЙ транзакции с несколькими инструкциями
 async fn create_payment_transaction(
     payment: &payment::Payment,
     payer_str: &str,
 ) -> anyhow::Result<String> {
-    use solana_client::rpc_client::RpcClient;
-    use solana_sdk::commitment_config::CommitmentConfig;
-
-    log::info!("🔧 Starting transaction creation...");
+    log::info!("🔧 Starting single transaction creation with multiple instructions...");
 
     let payer = Pubkey::from_str(payer_str)
         .map_err(|e| anyhow::anyhow!("Invalid payer address: {}", e))?;
@@ -225,18 +223,9 @@ async fn create_payment_transaction(
         log::info!("💰 SPL token transfer: {} {}", payment.amount, payment.token);
 
         let mint = match payment.token.as_str() {
-            "USDC" => {
-                log::info!("🔧 Using USDC mint");
-                Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")?
-            },
-            "USDT" => {
-                log::info!("🔧 Using USDT mint");
-                Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB")?
-            },
-            _ => {
-                log::error!("❌ Unsupported token: {}", payment.token);
-                anyhow::bail!("Unsupported token: {}", payment.token);
-            }
+            "USDC" => Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")?,
+            "USDT" => Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB")?,
+            _ => anyhow::bail!("Unsupported token: {}", payment.token),
         };
 
         let decimals = if payment.token == "USDC" || payment.token == "USDT" { 6 } else { 9 };
@@ -245,16 +234,9 @@ async fn create_payment_transaction(
         let from_token_account = spl_associated_token_account::get_associated_token_address(&payer, &mint);
         let to_token_account = spl_associated_token_account::get_associated_token_address(&recipient, &mint);
 
-        log::info!("🔧 Token accounts:");
-        log::info!("   From: {}", from_token_account);
-        log::info!("   To: {}", to_token_account);
-        log::info!("   Amount: {} tokens", amount);
+        log::info!("🔧 Main token transfer: {} {} tokens", amount, payment.token);
 
-        // Быстрая проверка RPC (АСИНХРОННО!)
-        log::info!("🔧 Checking recipient ATA...");
-
-        // Упрощенная проверка - просто добавляем инструкцию создания ATA на всякий случай
-        log::info!("🔧 Adding recipient ATA creation instruction (just in case)");
+        // Создание ATA для получателя (если не существует)
         instructions.push(
             spl_associated_token_account::instruction::create_associated_token_account(
                 &payer, &recipient, &mint, &spl_token::ID,
@@ -262,7 +244,6 @@ async fn create_payment_transaction(
         );
 
         // Основной transfer
-        log::info!("🔧 Adding main transfer instruction");
         instructions.push(token_instruction::transfer(
             &spl_token::ID,
             &from_token_account,
@@ -275,20 +256,16 @@ async fn create_payment_transaction(
     }
 
     // 2. КОМИССИЯ В USDC
-    log::info!("🔧 Creating fee instruction...");
+    log::info!("🔧 Adding fee instruction to the same transaction...");
     let usdc_mint = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")?;
     let fee_amount = (payment.fee_amount * 1_000_000.0) as u64;
 
     let from_usdc_account = spl_associated_token_account::get_associated_token_address(&payer, &usdc_mint);
     let to_usdc_account = spl_associated_token_account::get_associated_token_address(&fee_recipient, &usdc_mint);
 
-    log::info!("💳 Fee transfer:");
-    log::info!("   From: {}", from_usdc_account);
-    log::info!("   To: {}", to_usdc_account);
-    log::info!("   Amount: {} micro-USDC", fee_amount);
+    log::info!("💳 Fee transfer: {} micro-USDC", fee_amount);
 
-    // Проверяем ATA для fee получателя (упрощенно)
-    log::info!("🔧 Adding fee recipient ATA creation instruction (just in case)");
+    // Создание ATA для fee получателя (если не существует)
     instructions.push(
         spl_associated_token_account::instruction::create_associated_token_account(
             &payer, &fee_recipient, &usdc_mint, &spl_token::ID,
@@ -296,7 +273,6 @@ async fn create_payment_transaction(
     );
 
     // Fee transfer
-    log::info!("🔧 Adding fee transfer instruction");
     instructions.push(token_instruction::transfer(
         &spl_token::ID,
         &from_usdc_account,
@@ -313,23 +289,23 @@ async fn create_payment_transaction(
         .map_err(|e| anyhow::anyhow!("Failed to get blockhash: {}", e))?;
     log::info!("✅ Got blockhash: {}", recent_blockhash);
 
-    // 4. СОЗДАЕМ ПРАВИЛЬНУЮ ТРАНЗАКЦИЮ
-    log::info!("🔧 Creating transaction message...");
+    // 4. СОЗДАЕМ ОДНУ ТРАНЗАКЦИЮ СО ВСЕМИ ИНСТРУКЦИЯМИ
+    log::info!("🔧 Creating single transaction with {} instructions...", instructions.len());
     let message = Message::new(&instructions, Some(&payer));
     let mut transaction = Transaction::new_unsigned(message);
     transaction.message.recent_blockhash = recent_blockhash;
-    log::info!("✅ Transaction created with {} instructions", instructions.len());
+
+    log::info!("✅ Single transaction created with {} instructions", instructions.len());
 
     // 5. СЕРИАЛИЗУЕМ В BASE64
-    log::info!("🔧 Serializing transaction...");
+    log::info!("🔧 Serializing transaction for Solana Pay...");
     let serialized = bincode::serialize(&transaction)
         .map_err(|e| anyhow::anyhow!("Failed to serialize transaction: {}", e))?;
     let base64_transaction = general_purpose::STANDARD.encode(&serialized);
 
     log::info!("✅ Transaction serialized successfully!");
-    log::info!("   Instructions: {}", instructions.len());
-    log::info!("   Size: {} bytes", serialized.len());
-    log::info!("   Base64 length: {}", base64_transaction.len());
+    log::info!("   Instructions count: {}", instructions.len());
+    log::info!("   Serialized size: {} bytes", serialized.len());
 
     Ok(base64_transaction)
 }
@@ -450,6 +426,8 @@ async fn verify_payment(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    dotenv::dotenv().ok();
+
     env_logger::init();
     println!("🦀 Starting CryptoNow Rust Server...");
 
